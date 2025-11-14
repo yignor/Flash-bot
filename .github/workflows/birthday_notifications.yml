@@ -1,0 +1,49 @@
+name: Daily Operations
+
+on:
+  schedule:
+    # Один общий запуск каждый день в 06:00 UTC (09:00 по Москве)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  daily-operations:
+    runs-on: ubuntu-latest
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.CHAT_ID }}
+      ANNOUNCEMENTS_TOPIC_ID: ${{ secrets.ANNOUNCEMENTS_TOPIC_ID }}
+      GAMES_TOPIC_ID: ${{ secrets.GAMES_TOPIC_ID }}
+      TARGET_TEAMS: ${{ secrets.TARGET_TEAMS }}
+      GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      TEST_MODE: "false"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-github.txt
+
+      - name: Send birthday notifications
+        run: |
+          echo "🎂 Запуск проверки дней рождения"
+          python run_birthday_notifications.py
+
+      - name: Run voting polls manager
+        run: |
+          echo "📊 Запуск менеджера голосований"
+          python training_polls_enhanced.py
+
+      - name: Run game system manager
+        run: |
+          echo "🏀 Запуск системы управления играми"
+          python run_game_system.py
