@@ -32,13 +32,13 @@ def should_check_birthdays() -> bool:
     return now.hour == 9  # Проверяем весь час с 09:00 до 09:59 по Москве
 
 async def check_birthdays():
-    """Проверяет дни рождения и отправляет уведомления"""
+    """Проверяет дни рождения и отправляет уведомления (только в 09:00-09:59 по Москве)"""
     try:
         # Используем централизованное логирование времени
         time_info = log_current_time()
         
         if not should_check_birthdays():
-            print("📅 Не время для проверки дней рождения (только в 09:00-09:59)")
+            print("📅 Не время для проверки дней рождения (только в 09:00-09:59 по Москве)")
             return
         
         print("🎂 Проверяем дни рождения...")
@@ -88,18 +88,29 @@ async def check_birthdays():
         
         # Отправляем уведомления
         if birthday_messages:
-            # Инициализируем бота напрямую
+            # Проверяем настройки бота перед отправкой
             bot_token = os.getenv("BOT_TOKEN")
-            if not bot_token:
-                print("❌ BOT_TOKEN не настроен")
+            if not bot_token or bot_token == "your_bot_token_here":
+                print("❌ BOT_TOKEN не настроен или установлен значение по умолчанию")
+                print("   Установите реальный токен бота в переменной окружения BOT_TOKEN")
                 return
             
-            from telegram import Bot
-            current_bot = Bot(token=bot_token)
-            
             chat_id = os.getenv("CHAT_ID")
-            if not chat_id:
-                print("❌ CHAT_ID не настроен")
+            if not chat_id or chat_id == "your_production_chat_id_here":
+                print("❌ CHAT_ID не настроен или установлен значение по умолчанию")
+                print("   Установите реальный ID чата в переменной окружения CHAT_ID")
+                return
+            
+            # Инициализируем бота
+            from telegram import Bot
+            try:
+                current_bot = Bot(token=bot_token)
+                # Проверяем, что бот валиден
+                bot_info = await current_bot.get_me()
+                print(f"✅ Бот инициализирован: @{bot_info.username}")
+            except Exception as e:
+                print(f"❌ Ошибка инициализации бота: {e}")
+                print("   Проверьте правильность BOT_TOKEN")
                 return
 
             automation_topics = duplicate_protection.get_config_ids().get("automation_topics") or {}
@@ -132,9 +143,10 @@ async def check_birthdays():
                     player = birthday_players[i-1]
                     surname = player.get('surname', '')
                     first_name = player.get('name', '')
+                    player_age = player.get('age', 0)
                     today = get_moscow_time().strftime('%d.%m.%Y')
                     
-                    additional_info = f"{surname} {first_name} ({age} {get_years_word(age)})"
+                    additional_info = f"{surname} {first_name} ({player_age} {get_years_word(player_age)})"
                     duplicate_protection.add_record(
                         "ДЕНЬ_РОЖДЕНИЯ",
                         f"birthday_{today}_{surname}_{first_name}",
@@ -143,10 +155,30 @@ async def check_birthdays():
                     )
                     
                 except Exception as e:
-                    print(f"❌ Ошибка отправки уведомления {i}: {e}")
+                    error_msg = str(e)
+                    print(f"❌ Ошибка отправки уведомления {i}: {error_msg}")
+                    
+                    # Более информативные сообщения об ошибках
+                    if "Chat not found" in error_msg or "Not Found" in error_msg:
+                        print("   ⚠️ Чат не найден. Проверьте:")
+                        print(f"      - CHAT_ID правильный: {target_chat_id}")
+                        print("      - Бот добавлен в чат")
+                        print("      - Бот имеет права на отправку сообщений")
+                    elif "Unauthorized" in error_msg or "Invalid token" in error_msg:
+                        print("   ⚠️ Проблема с авторизацией бота. Проверьте BOT_TOKEN")
+                    elif "Bad Request" in error_msg:
+                        print("   ⚠️ Неверный запрос. Проверьте формат CHAT_ID и topic_id")
+                        print(f"      Chat ID: {target_chat_id}")
+                        print(f"      Topic ID: {birthday_topic_id}")
+                    else:
+                        import traceback
+                        print("   Детали ошибки:")
+                        traceback.print_exc()
         
     except Exception as e:
         print(f"❌ Ошибка проверки дней рождения: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def test_birthday_notifications():
     """Тестирует систему уведомлений о днях рождения"""

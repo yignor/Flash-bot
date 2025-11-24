@@ -14,7 +14,16 @@ import gspread
 load_dotenv()
 
 # Получаем переменные окружения
-GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+# Пробуем загрузить credentials улучшенным способом (для многострочного JSON)
+try:
+    from fix_credentials_loader import load_google_credentials
+    GOOGLE_SHEETS_CREDENTIALS = load_google_credentials()
+    if not GOOGLE_SHEETS_CREDENTIALS:
+        GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+except ImportError:
+    # Если модуль не найден, используем стандартный способ
+    GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
 # Настройки Google Sheets
@@ -255,7 +264,9 @@ class PlayersManager:
     def get_active_players(self) -> List[Dict[str, Any]]:
         """Получает только активных игроков"""
         all_players = self.get_all_players()
-        return [p for p in all_players if p.get('status', '').lower() == 'активный']
+        # Фильтруем активных игроков (статус "Активный" или пустой, так как по умолчанию "Активный")
+        active = [p for p in all_players if p.get('status', 'Активный').lower() in ['активный', 'active', '']]
+        return active
     
     def get_players_with_birthdays_today(self) -> List[Dict[str, Any]]:
         """Получает игроков с днями рождения сегодня"""
