@@ -34,7 +34,69 @@ TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"  # Тестовы�
 AUTOMATION_KEY_GAME_POLLS = "GAME_POLLS"
 AUTOMATION_KEY_GAME_ANNOUNCEMENTS = "GAME_ANNOUNCEMENTS"
 AUTOMATION_KEY_GAME_UPDATES = "GAME_UPDATES"
+AUTOMATION_KEY_GAME_RESULTS = "GAME_RESULTS"
 AUTOMATION_KEY_CALENDAR_EVENTS = "CALENDAR_EVENTS"
+
+def parse_chat_ids(chat_id_str: Optional[str]) -> List[str]:
+    """Парсит строку с ID чатов в список
+    
+    Поддерживает форматы:
+    - одиночный ID: "123456789"
+    - несколько ID через запятую: "123456789,987654321,111111111"
+    - несколько ID через пробел: "123456789 987654321 111111111"
+    """
+    if not chat_id_str:
+        return []
+    
+    chat_ids = []
+    for part in chat_id_str.replace(',', ' ').split():
+        chat_id = part.strip()
+        if chat_id:
+            chat_ids.append(chat_id)
+    
+    return chat_ids
+
+def get_chat_ids_for_automation(automation_key: str, automation_entry: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Получает список ID чатов для автоматического действия
+    
+    Логика:
+    - Если в таблице (automation_entry) есть chat_id и он заполнен:
+      → объединяем chat_id из таблицы и CHAT_ID из Secrets
+    - Если в таблице chat_id пустой или отсутствует:
+      → используем только CHAT_ID из Secrets
+    - Если и в Secrets нет, и в таблице пусто:
+      → возвращаем пустой список (не отправляем)
+    
+    Args:
+        automation_key: Ключ автоматизации (например, "GAME_POLLS")
+        automation_entry: Запись из конфигурации автоматизации (опционально)
+    
+    Returns:
+        Список ID чатов для отправки сообщений
+    """
+    chat_ids_from_secrets = parse_chat_ids(CHAT_ID)
+    chat_ids_from_table = []
+    
+    if automation_entry and automation_entry.get("chat_id"):
+        chat_ids_from_table = parse_chat_ids(automation_entry.get("chat_id"))
+    
+    # Объединяем списки, убираем дубликаты, сохраняем порядок
+    all_chat_ids = []
+    seen = set()
+    
+    # Сначала добавляем из таблицы (если есть)
+    for chat_id in chat_ids_from_table:
+        if chat_id not in seen:
+            all_chat_ids.append(chat_id)
+            seen.add(chat_id)
+    
+    # Затем добавляем из Secrets (если есть)
+    for chat_id in chat_ids_from_secrets:
+        if chat_id not in seen:
+            all_chat_ids.append(chat_id)
+            seen.add(chat_id)
+    
+    return all_chat_ids
 
 def create_game_key(game_info: Dict) -> str:
     """Создает уникальный ключ для игры"""
@@ -234,23 +296,57 @@ class GameSystemManager:
 
     @staticmethod
     def _normalize_name_for_search(name: str) -> str:
-        """Нормализует имя команды для сравнения"""
+        """Нормализует имя команды для сравнения
+        
+        Учитывает дефисы в названиях команд (например, "Военмех-Vintage").
+        Дефисы заменяются на пробелы для более гибкого поиска, но также сохраняется вариант с дефисом.
+        """
         if not isinstance(name, str):
             return ""
-        return re.sub(r"[\s\-_/]", "", name.strip().lower())
+        name = name.strip()
+        # Заменяем множественные пробелы на один
+        name = re.sub(r'\s+', ' ', name)
+        # Для поиска: убираем пробелы, но сохраняем дефисы как разделители
+        # Это позволяет находить "Военмех-Vintage" даже если в тексте "Военмех - Vintage"
+        normalized = re.sub(r'\s+', '', name.lower())
+        return normalized
 
     def _build_name_variants(self, *names: Optional[str]) -> Set[str]:
-        """Формирует набор уникальных вариантов имени команды"""
+        """Формирует набор уникальных вариантов имени команды
+        
+        Учитывает команды с дефисами (например, "Военмех-Vintage"):
+        - Оригинальное название с дефисом
+        - Вариант с пробелом вместо дефиса
+        - Нормализованный вариант без пробелов
+        """
         variants: Set[str] = set()
         for name in names:
             if not name or not isinstance(name, str):
                 continue
             stripped = name.strip()
             if stripped:
+                # Оригинальное название
                 variants.add(stripped)
+                
+                # Если есть дефис, добавляем варианты с пробелом и без разделителя
+                if '-' in stripped or '–' in stripped or '—' in stripped:
+                    # Вариант с пробелом вместо дефиса
+                    variant_with_space = re.sub(r'[-–—]', ' ', stripped)
+                    variants.add(variant_with_space)
+                    variants.add(variant_with_space.strip())
+                
+                # Нормализованный вариант (без пробелов, с дефисами)
                 normalized = self._normalize_name_for_search(stripped)
                 if normalized:
                     variants.add(normalized)
+                    
+                # Вариант без дефисов (для поиска "ВоенмехVintage")
+                variant_no_hyphen = re.sub(r'[-–—]', '', stripped)
+                if variant_no_hyphen != stripped:
+                    variants.add(variant_no_hyphen)
+                    normalized_no_hyphen = self._normalize_name_for_search(variant_no_hyphen)
+                    if normalized_no_hyphen:
+                        variants.add(normalized_no_hyphen)
         return variants
 
     def _find_matching_variant(self, normalized_text: str, variants: Sequence[str]) -> Optional[str]:
@@ -759,8 +855,12 @@ class GameSystemManager:
         opponent: str,
         form_color: str,
     ) -> None:
-        if not CHAT_ID:
-            print("⚠️ CHAT_ID отсутствует, пропускаем отправку календаря")
+        # Получаем список чатов для отправки календарей
+        calendar_events_entry = self._get_automation_entry(AUTOMATION_KEY_CALENDAR_EVENTS)
+        chat_ids = get_chat_ids_for_automation(AUTOMATION_KEY_CALENDAR_EVENTS, calendar_events_entry)
+        
+        if not chat_ids:
+            print("⚠️ Не настроены ID чатов для календарей (ни в таблице, ни в Secrets), пропускаем отправку")
             return
 
         game_id = str(game_info.get('game_id') or '')
@@ -787,27 +887,32 @@ class GameSystemManager:
             document = stream
 
         try:
-            send_kwargs: Dict[str, Any] = {
-                "chat_id": self._to_int(CHAT_ID) or CHAT_ID,
-                "document": document,
-                "caption": caption,
-            }
             message_thread_id: Optional[int] = self.calendar_events_topic_id
-            if message_thread_id is not None:
-                send_kwargs["message_thread_id"] = message_thread_id
+            
+            # Отправляем календарь во все настроенные чаты
+            for chat_id in chat_ids:
+                send_kwargs: Dict[str, Any] = {
+                    "chat_id": self._to_int(chat_id) or chat_id,
+                    "document": document,
+                    "caption": caption,
+                }
+                if message_thread_id is not None:
+                    send_kwargs["message_thread_id"] = message_thread_id
 
-            try:
-                await bot.send_document(**send_kwargs)
-            except Exception as primary_error:
-                if message_thread_id is not None and "Message thread not found" in str(primary_error):
-                    print(f"⚠️ Топик {message_thread_id} не найден, отправляем календарь в основной чат")
-                    self.calendar_events_topic_id = None
-                    send_kwargs.pop("message_thread_id", None)
+                try:
                     await bot.send_document(**send_kwargs)
-                else:
-                    raise primary_error
+                    print(f"📆 Отправлено календарное событие {filename} в чат {chat_id}")
+                except Exception as primary_error:
+                    if message_thread_id is not None and "Message thread not found" in str(primary_error):
+                        print(f"⚠️ Топик {message_thread_id} не найден в чате {chat_id}, отправляем календарь в основной чат")
+                        self.calendar_events_topic_id = None
+                        send_kwargs.pop("message_thread_id", None)
+                        await bot.send_document(**send_kwargs)
+                        print(f"📆 Отправлено календарное событие {filename} в чат {chat_id} (без топика)")
+                    else:
+                        print(f"❌ Ошибка отправки календаря в чат {chat_id}: {primary_error}")
+                        raise primary_error
 
-            print(f"📆 Отправлено календарное событие {filename}")
             self._log_game_action("КАЛЕНДАРЬ_ИГРА", game_info, "ICS ОТПРАВЛЁН", filename)
 
         except Exception as e:
@@ -818,8 +923,16 @@ class GameSystemManager:
         changes: Dict[str, Tuple[str, str]],
         game_info: Dict[str, Any]
     ) -> None:
-        if not self.bot or not CHAT_ID:
-            print("⚠️ Бот или CHAT_ID не настроены, уведомление об изменениях не отправлено")
+        if not self.bot:
+            print("⚠️ Бот не настроен, уведомление об изменениях не отправлено")
+            return
+        
+        # Получаем список чатов для отправки уведомлений об изменениях
+        game_updates_entry = self._get_automation_entry(AUTOMATION_KEY_GAME_UPDATES)
+        chat_ids = get_chat_ids_for_automation(AUTOMATION_KEY_GAME_UPDATES, game_updates_entry)
+        
+        if not chat_ids:
+            print("⚠️ Не настроены ID чатов для уведомлений об изменениях (ни в таблице, ни в Secrets)")
             return
 
         bot = cast(Any, self.bot)
@@ -857,24 +970,29 @@ class GameSystemManager:
 
         message = "\n".join(lines)
 
-        send_kwargs: Dict[str, Any] = {
-            "chat_id": self._to_int(CHAT_ID) or CHAT_ID,
-            "text": message,
-        }
         message_thread_id: Optional[int] = self.game_updates_topic_id
-        if message_thread_id is not None:
-            send_kwargs["message_thread_id"] = message_thread_id
 
-        try:
+        # Отправляем уведомление во все настроенные чаты
+        for chat_id in chat_ids:
+            send_kwargs: Dict[str, Any] = {
+                "chat_id": self._to_int(chat_id) or chat_id,
+                "text": message,
+            }
+            if message_thread_id is not None:
+                send_kwargs["message_thread_id"] = message_thread_id
+
             try:
                 await bot.send_message(**send_kwargs)
+                print(f"✅ Уведомление об изменениях отправлено в чат {chat_id}")
             except Exception as primary_error:
                 if message_thread_id is not None and "Message thread not found" in str(primary_error):
-                    print(f"⚠️ Топик {message_thread_id} не найден, отправляем обновление в основной чат")
+                    print(f"⚠️ Топик {message_thread_id} не найден в чате {chat_id}, отправляем обновление в основной чат")
                     self.game_updates_topic_id = None
                     send_kwargs.pop("message_thread_id", None)
                     await bot.send_message(**send_kwargs)
+                    print(f"✅ Уведомление об изменениях отправлено в чат {chat_id} (без топика)")
                 else:
+                    print(f"❌ Ошибка отправки уведомления в чат {chat_id}: {primary_error}")
                     raise primary_error
         except Exception as e:
             print(f"⚠️ Ошибка отправки уведомления об изменениях: {e}")
@@ -1246,9 +1364,17 @@ class GameSystemManager:
 
     
     async def create_game_poll(self, game_info: Dict) -> Optional[str]:
-        """Создает опрос для игры в топике 1282 и возвращает текст вопроса"""
-        if not self.bot or not CHAT_ID:
-            print("❌ Бот или CHAT_ID не настроены")
+        """Создает опрос для игры и возвращает текст вопроса"""
+        if not self.bot:
+            print("❌ Бот не настроен")
+            return None
+        
+        # Получаем список чатов для отправки опросов
+        game_polls_entry = self._get_automation_entry(AUTOMATION_KEY_GAME_POLLS)
+        chat_ids = get_chat_ids_for_automation(AUTOMATION_KEY_GAME_POLLS, game_polls_entry)
+        
+        if not chat_ids:
+            print("❌ Не настроены ID чатов (ни в таблице, ни в Secrets)")
             return None
         
         try:
@@ -1334,28 +1460,40 @@ class GameSystemManager:
                 "👨‍🏫 Тренер"
             ]
             
-            # Отправляем опрос (с проверкой топика)
-            try:
-                send_kwargs: Dict[str, Any] = {
-                    "chat_id": self._to_int(CHAT_ID) or CHAT_ID,
-                    "question": question,
-                    "options": options,
-                    "is_anonymous": self.game_poll_is_anonymous,
-                    "allows_multiple_answers": self.game_poll_allows_multiple,
-                }
-                message_thread_id = self.game_poll_topic_id
-                if message_thread_id is not None:
-                    send_kwargs["message_thread_id"] = message_thread_id
-                poll_message = await bot.send_poll(**send_kwargs)
-            except Exception as e:
-                if "Message thread not found" in str(e):
-                    thread_to_reset = send_kwargs.pop("message_thread_id", None)
-                    if thread_to_reset is not None:
-                        print(f"⚠️ Топик {thread_to_reset} не найден, отправляем в основной чат")
-                        self.game_poll_topic_id = None
+            # Отправляем опрос во все настроенные чаты (с проверкой топика)
+            message_thread_id = self.game_poll_topic_id
+            poll_messages = []
+            
+            for chat_id in chat_ids:
+                try:
+                    send_kwargs: Dict[str, Any] = {
+                        "chat_id": self._to_int(chat_id) or chat_id,
+                        "question": question,
+                        "options": options,
+                        "is_anonymous": self.game_poll_is_anonymous,
+                        "allows_multiple_answers": self.game_poll_allows_multiple,
+                    }
+                    if message_thread_id is not None:
+                        send_kwargs["message_thread_id"] = message_thread_id
+                    
                     poll_message = await bot.send_poll(**send_kwargs)
-                else:
-                    raise e
+                    poll_messages.append(poll_message)
+                    print(f"✅ Опрос отправлен в чат {chat_id}")
+                except Exception as e:
+                    if "Message thread not found" in str(e):
+                        thread_to_reset = send_kwargs.pop("message_thread_id", None)
+                        if thread_to_reset is not None:
+                            print(f"⚠️ Топик {thread_to_reset} не найден в чате {chat_id}, отправляем в основной чат")
+                            self.game_poll_topic_id = None
+                        poll_message = await bot.send_poll(**send_kwargs)
+                        poll_messages.append(poll_message)
+                        print(f"✅ Опрос отправлен в чат {chat_id} (без топика)")
+                    else:
+                        print(f"❌ Ошибка отправки опроса в чат {chat_id}: {e}")
+                        raise e
+            
+            # Используем первое сообщение для совместимости
+            poll_message = poll_messages[0] if poll_messages else None
             
             await self._send_calendar_event(bot, game_info, team_label, opponent, form_color)
             
@@ -1443,7 +1581,10 @@ class GameSystemManager:
             # Получаем текст ссылки (обычно содержит названия команд)
             link_text = anchor.get_text(strip=True)
             if not link_text:
-                continue
+                # Если текста нет, проверяем title или другие атрибуты
+                link_text = anchor.get('title', '') or anchor.get('aria-label', '')
+                if not link_text:
+                    continue
             
             # Нормализуем текст для поиска
             normalized_text = self._normalize_name_for_search(link_text)
@@ -1452,13 +1593,65 @@ class GameSystemManager:
             own_match = self._find_matching_variant(normalized_text, list(own_variants))
             opponent_match = self._find_matching_variant(normalized_text, list(opponent_variants))
             
+            # Если не нашли обе команды, пробуем более гибкий поиск:
+            # Разбиваем текст ссылки по разделителям и проверяем каждую часть отдельно
+            if not (own_match and opponent_match):
+                # Разделители для парсинга названий команд в тексте ссылки
+                separators = [r'\s*[-–—]\s*', r'\s+против\s+', r'\s+vs\s+', r'\s+и\s+', r'\s+vs\.\s+']
+                
+                for sep_pattern in separators:
+                    parts = re.split(sep_pattern, link_text, flags=re.IGNORECASE)
+                    if len(parts) >= 2:
+                        # Проверяем каждую часть отдельно
+                        for part in parts:
+                            part_normalized = self._normalize_name_for_search(part)
+                            if not own_match:
+                                own_match = self._find_matching_variant(part_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(part_normalized, list(opponent_variants))
+                        
+                        # Также проверяем комбинации соседних частей (для команд с дефисами)
+                        # Например, "Военмех-Vintage" может быть разбито на "Военмех" и "Vintage"
+                        for i in range(len(parts) - 1):
+                            combined = f"{parts[i]}-{parts[i+1]}"
+                            combined_normalized = self._normalize_name_for_search(combined)
+                            if not own_match:
+                                own_match = self._find_matching_variant(combined_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(combined_normalized, list(opponent_variants))
+                            
+                            # Также пробуем без дефиса
+                            combined_no_hyphen = f"{parts[i]}{parts[i+1]}"
+                            combined_no_hyphen_normalized = self._normalize_name_for_search(combined_no_hyphen)
+                            if not own_match:
+                                own_match = self._find_matching_variant(combined_no_hyphen_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(combined_no_hyphen_normalized, list(opponent_variants))
+                        
+                        if own_match and opponent_match:
+                            break
+                
+                # Если все еще не нашли, проверяем родительский элемент (может содержать текст)
+                if not (own_match and opponent_match):
+                    parent = anchor.parent
+                    if parent:
+                        parent_text = parent.get_text(strip=True)
+                        if parent_text and len(parent_text) > len(link_text):
+                            parent_normalized = self._normalize_name_for_search(parent_text)
+                            if not own_match:
+                                own_match = self._find_matching_variant(parent_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(parent_normalized, list(opponent_variants))
+            
             if own_match and opponent_match:
                 full_link = href if href.startswith('http') else urljoin(url, href)
                 print(f"✅ Найдена подходящая игра в fallback по тексту ссылки: {full_link}")
                 print(f"   Текст ссылки: {link_text}")
+                print(f"   Наша команда: {own_match}, Соперник: {opponent_match}")
                 return full_link, own_match
         
         # Если не нашли по тексту, пробуем старый способ (проверка содержимого страницы игры)
+        print(f"🔍 Поиск по тексту ссылки не дал результатов, проверяем содержимое страниц игр...")
         for anchor in anchors:
             href = anchor.get('href')
             if not href or ('gameId=' not in href and 'game.html' not in href):
@@ -1816,9 +2009,17 @@ class GameSystemManager:
             return f"🏀 Результат игры: {game_info.get('team1', '')} vs {game_info.get('team2', '')}"
     
     async def send_game_announcement(self, game_info: Dict, game_position: int = 1, game_link: Optional[str] = None, found_team: Optional[str] = None) -> bool:
-        """Отправляет анонс игры в основной топик"""
-        if not self.bot or not CHAT_ID:
-            print("❌ Бот или CHAT_ID не настроены")
+        """Отправляет анонс игры в настроенные чаты"""
+        if not self.bot:
+            print("❌ Бот не настроен")
+            return False
+        
+        # Получаем список чатов для отправки анонсов
+        game_announcements_entry = self._get_automation_entry(AUTOMATION_KEY_GAME_ANNOUNCEMENTS)
+        chat_ids = get_chat_ids_for_automation(AUTOMATION_KEY_GAME_ANNOUNCEMENTS, game_announcements_entry)
+        
+        if not chat_ids:
+            print("❌ Не настроены ID чатов для анонсов (ни в таблице, ни в Secrets)")
             return False
         
         try:
@@ -1840,12 +2041,19 @@ class GameSystemManager:
             if game_link:
                 print("🎮 Мониторинг результатов будет запущен автоматически за 5 минут до игры")
 
-            # Отправляем сообщение в основной топик (без указания топика)
-            message = await bot.send_message(
-                chat_id=int(CHAT_ID),
-                text=announcement_text,
-                parse_mode='HTML'
-            )
+            # Отправляем сообщение во все настроенные чаты
+            messages = []
+            for chat_id in chat_ids:
+                message = await bot.send_message(
+                    chat_id=int(chat_id) if chat_id.isdigit() or (chat_id.startswith('-') and chat_id[1:].isdigit()) else chat_id,
+                    text=announcement_text,
+                    parse_mode='HTML'
+                )
+                messages.append(message)
+                print(f"✅ Анонс отправлен в чат {chat_id}")
+            
+            # Используем первое сообщение для совместимости
+            message = messages[0] if messages else None
 
             # Сохраняем информацию об анонсе в сервисный лист
             announcement_key = create_announcement_key(game_info)

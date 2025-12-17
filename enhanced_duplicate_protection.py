@@ -60,7 +60,7 @@ CONFIG_HEADER = [
     "НАСТРОЙКИ (JSON)",
     "ДНИ НЕДЕЛИ",
     "URL FALLBACK",
-    "НАЗВАНИЕ FALLBACK"
+    "КОМАНДА ДЛЯ FALLBACK"
 ]
 CONFIG_SECTION_END_MARKERS = {
     "END",
@@ -102,6 +102,7 @@ VOTING_GUIDE_ROWS = [
 AUTOMATION_SECTION_HEADER = [
     "Автоматическое сообщение",
     "ID топика",
+    "ID чата",
     "Анонимный",
     "Множественный выбор",
     "Комментарий",
@@ -112,6 +113,7 @@ AUTOMATION_DEFAULT_ROWS = [
     {"key": "GAME_ANNOUNCEMENTS", "name": "Анонсы игр", "comment": "Сообщения с информацией об игре"},
     {"key": "GAME_POLLS", "name": "Опросы на игры", "comment": "Опрос о готовности на игру"},
     {"key": "GAME_UPDATES", "name": "Уведомления об изменениях", "comment": "Уведомления об изменениях в расписании игр"},
+    {"key": "GAME_RESULTS", "name": "Результаты игр", "comment": "Уведомления о результатах завершенных игр"},
     {"key": "CALENDAR_EVENTS", "name": "Календарные события", "comment": "Отправка календарных событий (.ics файлов)"},
 ]
 LEGACY_VOTING_HEADERS = [
@@ -249,11 +251,14 @@ class EnhancedDuplicateProtection:
                 header.extend([""] * (desired_length - len(header)))
             updated = False
             for index, expected in enumerate(CONFIG_HEADER):
-                if not header[index]:
+                current_value = header[index] if index < len(header) else ""
+                # Обновляем, если ячейка пустая или значение не соответствует ожидаемому
+                if not current_value or current_value.strip() != expected.strip():
                     header[index] = expected
                     updated = True
             if updated:
                 worksheet.update(f'A1:{chr(ord("A") + len(CONFIG_HEADER) - 1)}1', [header])
+                print(f"✅ Заголовки листа '{CONFIG_WORKSHEET_NAME}' обновлены")
             self._ensure_voting_section_structure(worksheet)
         except Exception as e:
             print(f"⚠️ Не удалось обновить заголовок листа '{CONFIG_WORKSHEET_NAME}': {e}")
@@ -382,11 +387,17 @@ class EnhancedDuplicateProtection:
                 all_data = worksheet.get_all_values()
                 header_row_index = len(all_data)
             else:
-                worksheet.update(
-                    f"A{header_row_index}:{chr(ord('A') + total_columns - 1)}{header_row_index}",
-                    [padded_header],
-                )
-                all_data[header_row_index - 1] = padded_header
+                # Всегда обновляем заголовок, чтобы убедиться что он соответствует текущей структуре
+                # Проверяем, совпадает ли текущий заголовок с новым
+                current_header = [cell.strip() for cell in all_data[header_row_index - 1][:len(AUTOMATION_SECTION_HEADER)]]
+                if current_header != AUTOMATION_SECTION_HEADER:
+                    # Заголовок устарел, обновляем его
+                    worksheet.update(
+                        f"A{header_row_index}:{chr(ord('A') + len(AUTOMATION_SECTION_HEADER) - 1)}{header_row_index}",
+                        [AUTOMATION_SECTION_HEADER],
+                    )
+                    all_data = worksheet.get_all_values()
+                    all_data[header_row_index - 1] = AUTOMATION_SECTION_HEADER + [""] * (len(all_data[header_row_index - 1]) - len(AUTOMATION_SECTION_HEADER))
 
             existing_entries: Dict[str, Dict[str, str]] = {}
             for row in all_data[header_row_index:]:
@@ -405,12 +416,14 @@ class EnhancedDuplicateProtection:
                 key_upper = mapped_key.upper() if mapped_key else label.upper()
                 display_name = AUTOMATION_KEY_TO_NAME.get(key_upper, label)
                 topic_value = row[1] if len(row) > 1 else ""
-                anon_value = row[2] if len(row) > 2 else ""
-                multiple_value = row[3] if len(row) > 3 else ""
-                comment_value = row[4] if len(row) > 4 else ""
+                chat_id_value = row[2] if len(row) > 2 else ""
+                anon_value = row[3] if len(row) > 3 else ""
+                multiple_value = row[4] if len(row) > 4 else ""
+                comment_value = row[5] if len(row) > 5 else ""
                 existing_entries[key_upper] = {
                     "label": display_name,
                     "topic": topic_value,
+                    "chat_id": chat_id_value,
                     "anon": anon_value,
                     "multiple": multiple_value,
                     "comment": comment_value,
@@ -422,21 +435,24 @@ class EnhancedDuplicateProtection:
                 existing = existing_entries.pop(key_upper, None)
                 label = default["name"]
                 topic_value = ""
+                chat_id_value = ""
                 anon_value = ""
                 multiple_value = ""
                 comment_value = default.get("comment", "")
                 if existing:
                     label = existing.get("label") or label
                     topic_value = existing.get("topic", "")
+                    chat_id_value = existing.get("chat_id", "")
                     anon_value = existing.get("anon", "")
                     multiple_value = existing.get("multiple", "")
                     comment_value = existing.get("comment", "") or comment_value
-                rows_to_write.append([label, topic_value, anon_value, multiple_value, comment_value])
+                rows_to_write.append([label, topic_value, chat_id_value, anon_value, multiple_value, comment_value])
 
             for key_upper, entry in existing_entries.items():
                 rows_to_write.append([
                     entry.get("label") or key_upper,
                     entry.get("topic", ""),
+                    entry.get("chat_id", ""),
                     entry.get("anon", ""),
                     entry.get("multiple", ""),
                     entry.get("comment", ""),
@@ -1422,9 +1438,10 @@ class EnhancedDuplicateProtection:
                     if raw_label.upper() == AUTOMATION_SECTION_END_MARKER:
                         break
                     topic_raw = self._normalize_cell_text(row[1]) if len(row) > 1 else ""
-                    anon_raw = row[2] if len(row) > 2 else ""
-                    multiple_raw = row[3] if len(row) > 3 else ""
-                    comment_raw = self._normalize_cell_text(row[4]) if len(row) > 4 else ""
+                    chat_id_raw = self._normalize_cell_text(row[2]) if len(row) > 2 else ""
+                    anon_raw = row[3] if len(row) > 3 else ""
+                    multiple_raw = row[4] if len(row) > 4 else ""
+                    comment_raw = self._normalize_cell_text(row[5]) if len(row) > 5 else ""
                     mapped_key = AUTOMATION_NAME_TO_KEY.get(raw_label.lower())
                     key_upper = mapped_key.upper() if mapped_key else raw_label.upper()
                     entry: Dict[str, Any] = {}
@@ -1436,6 +1453,9 @@ class EnhancedDuplicateProtection:
                         entry["topic_id"] = topic_id_value
                     elif topic_raw:
                         entry["topic_raw"] = topic_raw
+                    # Сохраняем chat_id из таблицы (может быть пустым, одним ID или несколькими через запятую)
+                    if chat_id_raw:
+                        entry["chat_id"] = chat_id_raw
                     anon_value = self._parse_bool_value(anon_raw)
                     if anon_value is not None:
                         entry["is_anonymous"] = anon_value
