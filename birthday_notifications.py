@@ -25,21 +25,11 @@ def get_years_word(age: int) -> str:
     else:
         return "лет"
 
-def should_check_birthdays() -> bool:
-    """Проверяет, нужно ли проверять дни рождения (в 09:00-09:59 по Москве)"""
-    # Получаем московское время
-    now = get_moscow_time()
-    return now.hour == 9  # Проверяем весь час с 09:00 до 09:59 по Москве
-
 async def check_birthdays():
     """Проверяет дни рождения и отправляет уведомления"""
     try:
         # Используем централизованное логирование времени
         time_info = log_current_time()
-        
-        if not should_check_birthdays():
-            print("📅 Не время для проверки дней рождения (только в 09:00-09:59)")
-            return
         
         print("🎂 Проверяем дни рождения...")
         
